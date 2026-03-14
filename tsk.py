@@ -5,6 +5,7 @@ import argparse
 import re
 from pathlib import Path
 from datetime import datetime, date, timedelta
+import textwrap
 
 # ---------------------------------------------------------------------------
 # Storage
@@ -37,6 +38,23 @@ def next_id(tasks):
 # ---------------------------------------------------------------------------
 
 
+MAX_WIDTH = 112
+
+ID_W   = 4
+DUE_W  = 10
+P_W    = 3
+E_W    = 3
+AGE_W  = 5
+
+FIXED = ID_W + DUE_W + P_W + E_W + AGE_W
+SEPS  = 3 * 6 + 1   # "| " and " |" for 6 columns
+
+TITLE_W = MAX_WIDTH - FIXED - SEPS
+
+def wrap(text, width):
+    return textwrap.wrap(text, width=width) or [""]
+
+
 def parse_filters(items):
     filters = []
     for item in items:
@@ -47,10 +65,15 @@ def parse_filters(items):
     return filters
 
 
-class Color:
-    RED = "\033[31m"
-    YELLOW = "\033[33m"
-    RESET = "\033[0m"
+def task_color(t):
+    today = date.today()
+    due = date.fromisoformat(t["due"])
+
+    if due < today or due == today:
+        return "\033[31m"   # red
+    if due == today + timedelta(days=1):
+        return "\033[33m"   # yellow
+    return ""
 
 
 def due_state(task):
@@ -160,6 +183,38 @@ def resolve_due(value: str, base: date | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def print_header():
+    print("-" * MAX_WIDTH)
+    print(
+        f"| {'ID'.center(ID_W)} "
+        f"| {'Due'.center(DUE_W)} "
+        f"| {'P'.center(P_W)} "
+        f"| {'E'.center(E_W)} "
+        f"| {'Age'.center(AGE_W)} "
+        f"| {'Title'.center(TITLE_W)} |"
+    )
+    print("-" * MAX_WIDTH)
+
+
+RESET = "\033[0m"
+
+def print_task_row(t):
+    title_lines = wrap(t["title"], TITLE_W)
+    color = t.get("color", "")
+
+    for line in title_lines:
+        print(
+            color +
+            f"| {str(t['id']).center(ID_W)} "
+            f"| {t['due'].center(DUE_W)} "
+            f"| {str(t['priority']).center(P_W)} "
+            f"| {str(t['effort']).center(E_W)} "
+            f"| {t['age'].center(AGE_W)} "
+            f"| {line.ljust(TITLE_W)} |"
+            + RESET
+        )
+
+
 def build_filter_fn(filters):
     def match(task):
         for key, value in filters:
@@ -245,75 +300,33 @@ def add_task(args):
     print(f"Added task {task['id']} (due {due})")
 
 
-def list_tasks(filter_fn=lambda t: True, sort_spec=None):
-    tasks = [t for t in load_tasks(TASK_FILE) if filter_fn(t)]
-    sort_tasks(tasks, sort_spec)
+def list_tasks(filter_fn=None, sort_spec=None):
+    tasks = load_tasks(TASK_FILE)
 
+    # 1️⃣ filter
+    if filter_fn:
+        tasks = [t for t in tasks if filter_fn(t)]
+
+    # 2️⃣ enrich tasks (age, coloring, etc.)
+    now = datetime.now()
+    for t in tasks:
+        t["color"] = task_color(t)
+        created = datetime.fromisoformat(t["created"])
+        t["age"] = f"{(now - created).days}d"
+
+    # 3️⃣ sort
+    if sort_spec:
+        tasks = sort_tasks(tasks, sort_spec)
+
+    # 4️⃣ output
     if not tasks:
         print("No tasks.")
         return
 
-    columns = [
-        ("ID", "id", True),
-        ("Title", "title", False),
-        ("Due", "due", True),
-        ("P", "priority", True),
-        ("E", "effort", True),
-        ("Comment", "comment", False),
-        ("Age", "age", True),
-    ]
-
-    # build rows using column definitions
-    rows = []
+    print_header()
     for t in tasks:
-        rows.append({
-            "id": str(t["id"]),
-            "title": t["title"],
-            "due": t["due"],
-            "priority": str(t["priority"]),
-            "effort": str(t["effort"]),
-            "comment": t["comment"],
-            "age": f"{task_age_days(t)}d",
-        })
-
-    # calculate widths based on labels + data
-    widths = {}
-    for label, key, _ in columns:
-        widths[label] = max(
-            len(label),
-            *(len(r[key]) for r in rows)
-        )
-
-    def format_cell(text, width, centered):
-        return text.center(width) if centered else text.ljust(width)
-
-    def line(row):
-        return "| " + " | ".join(
-            format_cell(row[key], widths[label], centered)
-            for label, key, centered in columns
-        ) + " |"
-
-    def header():
-        return "| " + " | ".join(
-            format_cell(label, widths[label], True)
-            for label, _, _ in columns
-        ) + " |"
-
-    def sep():
-        return "| " + " | ".join("-" * widths[label] for label, _, _ in columns) + " |"
-
-    print(header())
-    print(sep())
-    for task, r in zip(tasks, rows):
-        row = line(r)
-        state = due_state(task)
-
-        if state in ("overdue", "today"):
-            row = Color.RED + row + Color.RESET
-        elif state == "tomorrow":
-            row = Color.YELLOW + row + Color.RESET
-
-        print(row)
+        print_task_row(t)
+    print("-" * MAX_WIDTH)
 
 
 def sort_tasks(tasks, sort_spec=None):
@@ -596,7 +609,7 @@ elif args.cmd == "delete":
     delete_task(args.id)
 
 elif args.cmd == "postpone":
-    postpone(args.id, args.span)
+    postpone(args.id, args.value)
 
 else:
     parser.print_help()
