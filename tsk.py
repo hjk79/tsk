@@ -30,7 +30,11 @@ def save_tasks(file, tasks):
 
 
 def next_id(tasks):
-    return max((t["id"] for t in tasks), default=0) + 1
+    archive = load_tasks(ARCHIVE_FILE)
+
+    all_ids = [t["id"] for t in tasks] + [t["id"] for t in archive]
+
+    return max(all_ids, default=0) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +58,27 @@ TITLE_W = MAX_WIDTH - FIXED - SEPS
 def wrap(text, width):
     return textwrap.wrap(text, width=width) or [""]
 
+def parse_sort_spec(sort_str: str):
+    """
+    Convert --sort string into list of (key, reverse) tuples.
+    Example:
+        "due" -> [("due", False)]
+        "-priority" -> [("priority", True)]
+        "due,-priority" -> [("due", False), ("priority", True)]
+    """
+    if not sort_str:
+        return None
+
+    specs = []
+    for part in sort_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("-"):
+            specs.append((part[1:], True))
+        else:
+            specs.append((part, False))
+    return specs
 
 def parse_filters(items):
     filters = []
@@ -182,6 +207,51 @@ def resolve_due(value: str, base: date | None = None) -> str:
 # Commands
 # ---------------------------------------------------------------------------
 
+def show_task(task_id):
+    """Display full details of a single task (active or archived)."""
+    # try active first
+    tasks = load_tasks(TASK_FILE)
+    task = next((t for t in tasks if t["id"] == task_id), None)
+
+    source = "active"
+    if not task:
+        # try archive
+        tasks = load_tasks(ARCHIVE_FILE)
+        task = next((t for t in tasks if t["id"] == task_id), None)
+        source = "archive"
+
+    if not task:
+        print(f"Task {task_id} not found in active or archive.")
+        return
+
+    # compute age
+    now = datetime.now()
+    age = (now - datetime.fromisoformat(task["created"])).days
+
+    # optional color for active tasks
+    color = ""
+    reset = ""
+    if source == "active":
+        due_date = date.fromisoformat(task["due"])
+        today = date.today()
+        if due_date <= today:
+            color = "\033[31m"   # red
+        elif due_date == today + timedelta(days=1):
+            color = "\033[33m"   # yellow
+        reset = "\033[0m"
+
+    print("-" * MAX_WIDTH)
+    print(f"{color}ID      : {task['id']} ({source}){reset}")
+    print(f"{color}Title   : {task['title']}{reset}")
+    print(f"{color}Due     : {task['due']}{reset}")
+    print(f"{color}Priority: {task['priority']}{reset}")
+    print(f"{color}Effort  : {task['effort']}{reset}")
+    print(f"{color}Age     : {age}d{reset}")
+    if task.get("comment"):
+        print(f"{color}Comment :{reset}")
+        for line in wrap(task["comment"], MAX_WIDTH - 10):
+            print(f"{color}          {line}{reset}")
+    print("-" * MAX_WIDTH)
 
 def print_header():
     print("-" * MAX_WIDTH)
@@ -202,17 +272,31 @@ def print_task_row(t):
     title_lines = wrap(t["title"], TITLE_W)
     color = t.get("color", "")
 
-    for line in title_lines:
-        print(
-            color +
-            f"| {str(t['id']).center(ID_W)} "
-            f"| {t['due'].center(DUE_W)} "
-            f"| {str(t['priority']).center(P_W)} "
-            f"| {str(t['effort']).center(E_W)} "
-            f"| {t['age'].center(AGE_W)} "
-            f"| {line.ljust(TITLE_W)} |"
-            + RESET
-        )
+    for i, line in enumerate(title_lines):
+        if i == 0:
+            # first line: print all columns
+            print(
+                color +
+                f"| {str(t['id']).center(ID_W)} "
+                f"| {t['due'].center(DUE_W)} "
+                f"| {str(t['priority']).center(P_W)} "
+                f"| {str(t['effort']).center(E_W)} "
+                f"| {t['age'].center(AGE_W)} "
+                f"| {line.ljust(TITLE_W)} |"
+                + RESET
+            )
+        else:
+            # subsequent lines: leave other columns blank
+            print(
+                color +
+                f"| {'':{ID_W}} "
+                f"| {'':{DUE_W}} "
+                f"| {'':{P_W}} "
+                f"| {'':{E_W}} "
+                f"| {'':{AGE_W}} "
+                f"| {line.ljust(TITLE_W)} |"
+                + RESET
+            )
 
 
 def build_filter_fn(filters):
@@ -224,10 +308,6 @@ def build_filter_fn(filters):
 
             elif key == "effort":
                 if task["effort"] != int(value):
-                    return False
-
-            elif key == "status":
-                if task["status"] != value:
                     return False
 
             elif key == "title":
@@ -292,7 +372,6 @@ def add_task(args):
         "comment": fields.get("comment", ""),
         "priority": int(fields.get("prio", 3)),
         "effort": int(fields.get("effort", 1)),
-        "status": "open",
     }
 
     tasks.append(task)
@@ -300,25 +379,34 @@ def add_task(args):
     print(f"Added task {task['id']} (due {due})")
 
 
-def list_tasks(filter_fn=None, sort_spec=None):
-    tasks = load_tasks(TASK_FILE)
+def list_tasks(filter_fn=None, sort_spec=None, archive=False):
+    source = ARCHIVE_FILE if archive else TASK_FILE
+    tasks = load_tasks(source)
 
-    # 1️⃣ filter
+    # 1 filter
     if filter_fn:
         tasks = [t for t in tasks if filter_fn(t)]
 
-    # 2️⃣ enrich tasks (age, coloring, etc.)
+    # 2 enrich tasks (age, coloring, etc.)
     now = datetime.now()
     for t in tasks:
-        t["color"] = task_color(t)
         created = datetime.fromisoformat(t["created"])
         t["age"] = f"{(now - created).days}d"
+       
+        if archive:
+            t["color"] = ""
+        else:
+            t["color"] = task_color(t)
 
-    # 3️⃣ sort
+    # 3 sort
     if sort_spec:
-        tasks = sort_tasks(tasks, sort_spec)
+        # If sort_spec is a string from CLI, parse it into list of tuples
+        if isinstance(sort_spec, str):
+            sort_spec = parse_sort_spec(sort_spec)
+        # sort in place
+        sort_tasks(tasks, sort_spec)
 
-    # 4️⃣ output
+    # 4 output
     if not tasks:
         print("No tasks.")
         return
@@ -331,31 +419,30 @@ def list_tasks(filter_fn=None, sort_spec=None):
 
 def sort_tasks(tasks, sort_spec=None):
     if not sort_spec:
-        # default: due, then priority
         sort_spec = [("due", False), ("priority", False)]
 
     for key, reverse in reversed(sort_spec):
         if key == "age":
             tasks.sort(
-                key=lambda t: task_age_days(t),
+                key=lambda t: (datetime.now() - datetime.fromisoformat(t["created"])).days,
+                reverse=reverse,
+            )
+        elif key == "due":
+            tasks.sort(
+                key=lambda t: date.fromisoformat(t["due"]),
+                reverse=reverse,
+            )
+        elif key in ("priority", "effort", "id"):
+            tasks.sort(
+                key=lambda t: int(t[key]),  # numeric sort
                 reverse=reverse,
             )
         else:
+            # string fields
             tasks.sort(
-                key=lambda t: t[key],
+                key=lambda t: t[key].lower(),
                 reverse=reverse,
             )
-
-
-def close_task(task_id):
-    tasks = load_tasks(TASK_FILE)
-    for t in tasks:
-        if t["id"] == task_id:
-            t["status"] = "done"
-            save_tasks(TASK_FILE, tasks)
-            print(f"Closed task {task_id}")
-            return
-    print("Task not found")
 
 
 def delete_task(task_id):
@@ -394,13 +481,13 @@ def postpone(task_id, value):
 
 def due_today():
     today = date.today().isoformat()
-    list_tasks(lambda t: t["due"] == today and t["status"] == "open")
+    list_tasks(lambda t: t["due"] == today)
 
 def due_today(sort_spec=None, extra_filters=None):
     today = date.today().isoformat()
 
     def base(t):
-        return t["due"] == today and t["status"] == "open"
+        return t["due"] == today
 
     fn = base
     if extra_filters:
@@ -415,7 +502,7 @@ def due_week(sort_spec=None, extra_filters=None):
 
     def base(t):
         d = date.fromisoformat(t["due"])
-        return start <= d <= end and t["status"] == "open"
+        return start <= d <= end
 
     fn = base
 
@@ -444,7 +531,6 @@ DATE FORMATS
 FILTERS (key:value, AND-combined)
   prio:N            priority equals N
   effort:N          effort equals N
-  status:open|done
   title:TEXT        substring match
   comment:TEXT      substring match
   due:DATE          exact date
@@ -473,6 +559,10 @@ EXAMPLES
 )
 
 sub = parser.add_subparsers(dest="cmd")
+
+s = sub.add_parser("show", help="Show detailed task by ID")
+s.add_argument("id", type=int, help="ID of the task to show")
+s.add_argument("-a", "--archive", action="store_true", help="show task from archive")
 
 a = sub.add_parser(
     "add",
@@ -514,12 +604,12 @@ SORTING
 Examples:
   tsk list
   tsk list prio:1
-  tsk list status:open --sort due
 """,
     formatter_class=argparse.RawDescriptionHelpFormatter,
 )
 l.add_argument("filters", nargs="*", help="filter expressions")
 l.add_argument("--sort", help="sort keys, e.g. due,-prio")
+l.add_argument("-a", "--archive", action="store_true", help="show archived tasks")
 
 t = sub.add_parser(
     "today",
@@ -555,9 +645,6 @@ Examples:
 w.add_argument("filters", nargs="*", help="filter expressions")
 w.add_argument("--sort", help="sort keys")
 
-c = sub.add_parser("close")
-c.add_argument("id", type=int)
-
 d = sub.add_parser("delete")
 d.add_argument("id", type=int)
 
@@ -586,11 +673,14 @@ args = parser.parse_args()
 if args.cmd == "add":
     add_task(args)
 
+elif args.cmd == "show":
+    show_task(args.id)
+
 elif args.cmd == "list":
     filters = parse_filters(args.filters)
     fn = build_filter_fn(filters)
     spec = parse_sort(args.sort) if args.sort else None
-    list_tasks(filter_fn=fn, sort_spec=spec)
+    list_tasks(filter_fn=fn, sort_spec=spec, archive=args.archive)
 
 elif args.cmd == "today":
     filters = parse_filters(args.filters)
@@ -601,9 +691,6 @@ elif args.cmd == "week":
     filters = parse_filters(args.filters)
     spec = parse_sort(args.sort) if args.sort else None
     due_week(sort_spec=spec, extra_filters=filters)
-
-elif args.cmd == "close":
-    close_task(args.id)
 
 elif args.cmd == "delete":
     delete_task(args.id)
