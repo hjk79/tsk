@@ -41,6 +41,7 @@ def next_id(tasks):
 # Helpers
 # ---------------------------------------------------------------------------
 
+TIME_FMT = "%Y-%m-%d %H:%M"
 
 MAX_WIDTH = 112
 
@@ -207,51 +208,99 @@ def resolve_due(value: str, base: date | None = None) -> str:
 # Commands
 # ---------------------------------------------------------------------------
 
+def add_comment(task_id, text):
+    """Append a comment to a task (active or archived)."""
+
+    # determine where the task lives
+    source = TASK_FILE
+    tasks = load_tasks(source)
+
+    task = next((t for t in tasks if t["id"] == task_id), None)
+
+    if not task:
+        source = ARCHIVE_FILE
+        tasks = load_tasks(source)
+        task = next((t for t in tasks if t["id"] == task_id), None)
+
+    if not task:
+        print(f"Task {task_id} not found.")
+        return
+
+    # convert legacy comment if needed
+    if "comments" not in task:
+        task["comments"] = []
+        if task.get("comment"):
+            task["comments"].append({
+                "time": task["created"],
+                "text": task["comment"]
+            })
+            del task["comment"]
+
+    # append new comment
+    task["comments"].append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "text": text
+    })
+
+    save_tasks(source, tasks)
+
+    print(f"Added comment to task {task_id}.")
+
 def show_task(task_id):
-    """Display full details of a single task (active or archived)."""
-    # try active first
+    """Display full details of a single task."""
     tasks = load_tasks(TASK_FILE)
     task = next((t for t in tasks if t["id"] == task_id), None)
 
     source = "active"
+
     if not task:
-        # try archive
         tasks = load_tasks(ARCHIVE_FILE)
         task = next((t for t in tasks if t["id"] == task_id), None)
         source = "archive"
 
     if not task:
-        print(f"Task {task_id} not found in active or archive.")
+        print(f"Task {task_id} not found.")
         return
 
-    # compute age
     now = datetime.now()
     age = (now - datetime.fromisoformat(task["created"])).days
 
-    # optional color for active tasks
-    color = ""
-    reset = ""
-    if source == "active":
-        due_date = date.fromisoformat(task["due"])
-        today = date.today()
-        if due_date <= today:
-            color = "\033[31m"   # red
-        elif due_date == today + timedelta(days=1):
-            color = "\033[33m"   # yellow
-        reset = "\033[0m"
+    print("-" * MAX_WIDTH)
 
-    print("-" * MAX_WIDTH)
-    print(f"{color}ID      : {task['id']} ({source}){reset}")
-    print(f"{color}Title   : {task['title']}{reset}")
-    print(f"{color}Due     : {task['due']}{reset}")
-    print(f"{color}Priority: {task['priority']}{reset}")
-    print(f"{color}Effort  : {task['effort']}{reset}")
-    print(f"{color}Age     : {age}d{reset}")
-    if task.get("comment"):
-        print(f"{color}Comment :{reset}")
-        for line in wrap(task["comment"], MAX_WIDTH - 10):
-            print(f"{color}          {line}{reset}")
-    print("-" * MAX_WIDTH)
+    print(f"ID      : {task['id']} ({source})")
+    print(f"Title   : {task['title']}")
+    print(f"Created : {task['created']}")
+    print(f"Due     : {task['due']}")
+    print(f"Priority: {task['priority']}")
+    print(f"Effort  : {task['effort']}")
+    print(f"Age     : {age}d")
+
+    # --- comments section ---
+    if "comments" in task and task["comments"]:
+        print("\nComments")
+        print("-" * MAX_WIDTH)
+
+        TS_W = 16  # width of timestamp column
+        TEXT_W = MAX_WIDTH - TS_W - 2
+
+        for c in task["comments"]:
+            ts = c.get("time", "")
+            text = c.get("text", "")
+
+            lines = wrap(text, TEXT_W)
+
+            for i, line in enumerate(lines):
+                if i == 0:
+                    print(f"{ts.ljust(TS_W)}  {line}")
+                else:
+                    print(f"{' '*TS_W}  {line}")
+
+    elif task.get("comment"):
+        print("\nComment")
+        print("-" * MAX_WIDTH)
+
+        for line in wrap(task["comment"], MAX_WIDTH):
+            print(line)
 
 def print_header():
     print("-" * MAX_WIDTH)
@@ -564,6 +613,10 @@ s = sub.add_parser("show", help="Show detailed task by ID")
 s.add_argument("id", type=int, help="ID of the task to show")
 s.add_argument("-a", "--archive", action="store_true", help="show task from archive")
 
+c = sub.add_parser("comment", help="Add comment to a task")
+c.add_argument("id", type=int, help="Task ID")
+c.add_argument("text", help="Comment text")
+
 a = sub.add_parser(
     "add",
     help="Add a new task",
@@ -672,6 +725,9 @@ args = parser.parse_args()
 
 if args.cmd == "add":
     add_task(args)
+
+elif args.cmd == "comment":
+    add_comment(args.id, args.text)
 
 elif args.cmd == "show":
     show_task(args.id)
